@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+backend/tmp/
+backend/server
+frontend/dist/
+
+# Environment
+.env
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+postgres_data/
+
+# Logs
+*.log
+
+# Certificates (generated at runtime)
+/etc/letsencrypt/
+package-lock.json

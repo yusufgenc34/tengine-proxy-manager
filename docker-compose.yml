@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_NAME:-tpm}
+      POSTGRES_USER: ${DB_USER:-tpm}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-tpm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-tpm}
+      DB_USER: ${DB_USER:-tpm}
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      TENGINE_CONF_DIR: /etc/tengine/conf.d
+    volumes:
+      - tengine_conf:/etc/tengine
+      - letsencrypt_data:/etc/letsencrypt
+    ports:
+      - "4000:4000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  tengine:
+    build:
+      context: ./docker/tengine
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8888:8888"
+    volumes:
+      - tengine_conf:/etc/tengine
+      - letsencrypt_data:/etc/letsencrypt:ro
+      - tengine_logs:/var/log/tengine
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  tengine_conf:
+  letsencrypt_data:
+  tengine_logs:

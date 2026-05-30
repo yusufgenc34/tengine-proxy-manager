@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tpm_dev
+      POSTGRES_USER: tpm
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tpm -d tpm_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: tpm_dev
+      DB_USER: tpm
+      DB_PASSWORD: devpassword
+      JWT_SECRET: devsecret_en_az_32_karakter_olmali
+      TENGINE_CONF_DIR: /etc/tengine/conf.d
+    volumes:
+      - ./backend:/app
+      - tengine_conf:/etc/tengine
+      - letsencrypt_data:/etc/letsencrypt
+    ports:
+      - "4000:4000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+  tengine:
+    build:
+      context: ./docker/tengine
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8888:8888"
+    volumes:
+      - tengine_conf:/etc/tengine
+      - letsencrypt_data:/etc/letsencrypt
+      - tengine_logs:/var/log/tengine
+    depends_on:
+      - backend
+
+volumes:
+  postgres_dev_data:
+  tengine_conf:
+  letsencrypt_data:
+  tengine_logs:
