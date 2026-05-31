@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -11,6 +12,7 @@ import (
 	"tpm/internal/database"
 	"tpm/internal/handler"
 	mw "tpm/internal/middleware"
+	"tpm/internal/service"
 )
 
 func main() {
@@ -19,13 +21,16 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Write initial Cloudflare config (disabled) so tengine doesn't fail on include
+	service.WriteCloudflareGeoOff()
+
 	e := echo.New()
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(mw.SecureHeaders())
 	e.Use(mw.IPWhitelist())
 
-	// CORS — only allow configured origins
+	// CORS
 	allowedOrigins := []string{"http://localhost:5173", "http://localhost:3000"}
 	if extra := os.Getenv("CORS_ORIGINS"); extra != "" {
 		for _, o := range strings.Split(extra, ",") {
@@ -45,13 +50,17 @@ func main() {
 
 	h := handler.New(db)
 
+	// Start Cloudflare IP sync (every 7 days)
+	h.StartCloudflareSync(7 * 24 * time.Hour)
+
 	api := e.Group("/api/v1")
 
 	// Rate limiters
-	loginLimiter := mw.NewRateLimiter(10, 5)   // 10/min, burst 5
-	apiLimiter := mw.NewRateLimiter(120, 30)    // 120/min, burst 30
+	loginLimiter := mw.NewRateLimiter(10, 5)  // 10/min, burst 5
+	apiLimiter := mw.NewRateLimiter(120, 30)  // 120/min, burst 30
 
 	// Public (with strict rate limiting on auth endpoints)
+	api.GET("/health", h.GetHealth)
 	api.GET("/setup/status", h.GetSetupStatus)
 	api.POST("/setup", h.InitialSetup, loginLimiter.Middleware())
 	api.POST("/auth/login", h.Login, loginLimiter.Middleware())
@@ -89,6 +98,9 @@ func main() {
 
 	r.GET("/settings/default-server", h.GetDefaultServer)
 	r.PUT("/settings/default-server", h.UpdateDefaultServer)
+	r.GET("/settings/cloudflare", h.GetCloudflareSettings)
+	r.PUT("/settings/cloudflare", h.UpdateCloudflareSettings)
+	r.POST("/settings/cloudflare/refresh", h.RefreshCloudflareIPs)
 
 	r.GET("/audit-logs", h.ListAuditLogs)
 	r.GET("/audit-logs/action-types", h.GetActionTypes)

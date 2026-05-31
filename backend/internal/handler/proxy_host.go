@@ -110,9 +110,20 @@ func (h *Handler) CreateProxyHost(c echo.Context) error {
 	}
 
 	if h.tengine != nil {
+		// Validate SSL cert files exist before writing config to prevent tengine crash
+		if err := h.validator.ValidateProxyHost(&host); err != nil {
+			h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.create.validation_error",
+				fmt.Sprintf("Domain: %s - %v", host.Domain, err))
+			return c.JSON(http.StatusBadRequest, model.APIError{
+				Error:   true,
+				Message: err.Error(),
+				Code:    "CERT_MISSING",
+			})
+		}
+
 		if err := h.tengine.GenerateAndReload(host); err != nil {
 			h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.create.tengine_error",
-				fmt.Sprintf("Domain: %s — Tengine error: %v", host.Domain, err))
+				fmt.Sprintf("Domain: %s - Tengine error: %v", host.Domain, err))
 			return c.JSON(http.StatusInternalServerError, model.APIError{
 				Error:   true,
 				Message: "Proxy host created but config generation failed",
@@ -122,7 +133,7 @@ func (h *Handler) CreateProxyHost(c echo.Context) error {
 	}
 
 	h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.create",
-		fmt.Sprintf("Domain: %s → %s://%s:%d", host.Domain, host.ForwardScheme, host.ForwardHost, host.ForwardPort))
+		fmt.Sprintf("Domain: %s -> %s://%s:%d", host.Domain, host.ForwardScheme, host.ForwardHost, host.ForwardPort))
 
 	return c.JSON(http.StatusCreated, host)
 }
@@ -199,9 +210,20 @@ func (h *Handler) UpdateProxyHost(c echo.Context) error {
 	h.db.Preload("Certificate").Preload("AccessList").First(&host, id)
 
 	if h.tengine != nil {
+		// Validate SSL cert files exist before writing config to prevent tengine crash
+		if err := h.validator.ValidateProxyHost(&host); err != nil {
+			h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.update.validation_error",
+				fmt.Sprintf("ID: %d - %v", id, err))
+			return c.JSON(http.StatusBadRequest, model.APIError{
+				Error:   true,
+				Message: err.Error(),
+				Code:    "CERT_MISSING",
+			})
+		}
+
 		if err := h.tengine.GenerateAndReload(host); err != nil {
 			h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.update.tengine_error",
-				fmt.Sprintf("ID: %d — Tengine error: %v", id, err))
+				fmt.Sprintf("ID: %d - Tengine error: %v", id, err))
 		}
 	}
 

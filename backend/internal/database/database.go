@@ -37,6 +37,7 @@ func Connect() (*gorm.DB, error) {
 		&model.AccessList{},
 		&model.User{},
 		&model.AuditLog{},
+		&model.CloudflareSettings{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("migration failed: %w", err)

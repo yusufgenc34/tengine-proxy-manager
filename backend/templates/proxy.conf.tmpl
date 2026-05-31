@@ -25,11 +25,15 @@ server {
     deny all;
     {{- end }}
 
-    location /.well-known/acme-challenge/ {
+    location ^~ /.well-known/acme-challenge/ {
+        allow all;
         root /etc/tengine/html;
     }
 
     location / {
+        if ($cf_allow = 0) {
+            return 403;
+        }
         proxy_pass {{ .ForwardScheme }}://backend_{{ .Domain }};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

@@ -16,6 +16,7 @@ import AuditLogs from './pages/AuditLogs'
 import Security from './pages/Security'
 import Settings from './pages/Settings'
 import DefaultServer from './pages/settings/DefaultServer'
+import CloudflareIP from './pages/settings/CloudflareIP'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
 
@@ -55,6 +56,7 @@ function ProtectedLayout() {
             <Route path="/security" element={<Security />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/settings/default-server" element={<DefaultServer />} />
+            <Route path="/settings/cloudflare" element={<CloudflareIP />} />
           </Routes>
         </main>
       </div>

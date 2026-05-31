@@ -18,11 +18,15 @@ server {
     listen 80;
     server_name {{ .Domain }};
 
-    location /.well-known/acme-challenge/ {
+    location ^~ /.well-known/acme-challenge/ {
+        allow all;
         root /etc/tengine/html;
     }
 
     location / {
+        if ($cf_allow = 0) {
+            return 403;
+        }
         return 301 https://$host$request_uri;
     }
 }
@@ -50,6 +54,9 @@ server {
     ssl_session_timeout 10m;
 
     location / {
+        if ($cf_allow = 0) {
+            return 403;
+        }
         proxy_pass {{ .ForwardScheme }}://backend_{{ .Domain }};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

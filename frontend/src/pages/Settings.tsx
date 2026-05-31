@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { Globe, ArrowRight } from 'lucide-react'
+import { Globe, Shield, ArrowRight } from 'lucide-react'
 
 const modules = [
   {
@@ -8,6 +8,13 @@ const modules = [
     desc: 'Configure what Tengine returns on unmatched domains and port 80 fallback.',
     icon: Globe,
     color: 'bg-blue-500',
+  },
+  {
+    id: 'cloudflare',
+    title: 'Cloudflare IP Whitelist',
+    desc: 'Restrict ports 80 & 443 to only Cloudflare IP ranges. Auto-updates weekly.',
+    icon: Shield,
+    color: 'bg-orange-500',
   },
 ]
 

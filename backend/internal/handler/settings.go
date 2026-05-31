@@ -87,11 +87,17 @@ server {
     listen 80 default_server;
     server_name _;
 
-    location /.well-known/acme-challenge/ {
+    location ^~ /.well-known/acme-challenge/ {
+        allow all;
         root /etc/tengine/html;
     }
 
-    ` + rule + `
+    location / {
+        if ($cf_allow = 0) {
+            return 403;
+        }
+        ` + rule + `
+    }
 }
 `
 }
@@ -104,11 +110,15 @@ server {
     listen 80 default_server;
     server_name _;
 
-    location /.well-known/acme-challenge/ {
+    location ^~ /.well-known/acme-challenge/ {
+        allow all;
         root /etc/tengine/html;
     }
 
     location / {
+        if ($cf_allow = 0) {
+            return 403;
+        }
         default_type text/html;
         return 200 '` + escaped + `';
     }
@@ -129,6 +139,133 @@ func extractReturnValue(config, code string) string {
 		s = s[:end]
 	}
 	return s
+}
+
+// GetCloudflareSettings returns Cloudflare IP whitelist configuration.
+func (h *Handler) GetCloudflareSettings(c echo.Context) error {
+	cfg, err := h.cf.GetSettings()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, model.APIError{
+			Error: true, Message: "Failed to load Cloudflare settings", Code: "DB_ERROR",
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"enabled":      cfg.Enabled,
+		"ipv4_count":   cfg.IPv4Count(),
+		"ipv6_count":   cfg.IPv6Count(),
+		"last_fetched": cfg.LastFetched,
+		"updated_at":   cfg.UpdatedAt,
+	})
+}
+
+// UpdateCloudflareSettings enables or disables the Cloudflare IP whitelist.
+func (h *Handler) UpdateCloudflareSettings(c echo.Context) error {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, model.APIError{
+			Error: true, Message: "Invalid request", Code: "BAD_REQUEST",
+		})
+	}
+
+	cfg, err := h.cf.Toggle(req.Enabled)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, model.APIError{
+			Error: true, Message: err.Error(), Code: "CLOUDFLARE_ERROR",
+		})
+	}
+
+	// Regenerate all proxy host configs to apply Cloudflare IP whitelist changes
+	h.regenerateAllProxyHosts()
+
+	h.audit.Log(userIDFromContext(c), clientIP(c), "settings.cloudflare",
+		fmt.Sprintf("Cloudflare IP whitelist %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]))
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"enabled":      cfg.Enabled,
+		"ipv4_count":   cfg.IPv4Count(),
+		"ipv6_count":   cfg.IPv6Count(),
+		"last_fetched": cfg.LastFetched,
+		"updated_at":   cfg.UpdatedAt,
+	})
+}
+
+// RefreshCloudflareIPs manually triggers an IP list refresh.
+func (h *Handler) RefreshCloudflareIPs(c echo.Context) error {
+	if err := h.cf.RefreshIPs(); err != nil {
+		return c.JSON(http.StatusInternalServerError, model.APIError{
+			Error: true, Message: "Failed to refresh Cloudflare IPs: " + err.Error(), Code: "CLOUDFLARE_ERROR",
+		})
+	}
+
+	cfg, _ := h.cf.GetSettings()
+
+	h.regenerateAllProxyHosts()
+
+	h.audit.Log(userIDFromContext(c), clientIP(c), "settings.cloudflare.refresh", "Manual IP refresh")
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"enabled":      cfg.Enabled,
+		"ipv4_count":   cfg.IPv4Count(),
+		"ipv6_count":   cfg.IPv6Count(),
+		"last_fetched": cfg.LastFetched,
+		"updated_at":   cfg.UpdatedAt,
+	})
+}
+
+// regenerateDefaultServer rewrites the default server config from current settings.
+func (h *Handler) regenerateDefaultServer(cfg *model.CloudflareSettings) {
+	// Read current status and body from existing config
+	status := "444"
+	body := ""
+	data, err := os.ReadFile(defaultConfPath)
+	if err == nil {
+		s := string(data)
+		if strings.Contains(s, "return 301 ") {
+			status = "301"
+			body = extractReturnValue(s, "301")
+		} else if strings.Contains(s, "return 403;") {
+			status = "403"
+		} else if strings.Contains(s, "return 404;") {
+			status = "404"
+		} else if strings.Contains(s, "return 502;") {
+			status = "502"
+		} else if strings.Contains(s, "return 200 '") {
+			status = "200"
+			body = extractCustomBody(s)
+		}
+	}
+
+	var content string
+	switch status {
+	case "301":
+		content = defaultServerBlock("return 301 " + body + ";\n")
+	case "200":
+		content = customBodyBlock(body)
+	default:
+		content = defaultServerBlock("return " + status + ";\n")
+	}
+
+	os.WriteFile(defaultConfPath, []byte(content), 0644)
+}
+
+// regenerateAllProxyHosts regenerates config files for all proxy hosts.
+// This ensures template changes (like cloudflare-ips.conf include) are applied.
+func (h *Handler) regenerateAllProxyHosts() {
+	if h.tengine == nil {
+		return
+	}
+
+	var hosts []model.ProxyHost
+	h.db.Preload("Certificate").Preload("AccessList").Find(&hosts)
+
+	for _, host := range hosts {
+		if host.Enabled {
+			h.tengine.GenerateAndReload(host)
+		}
+	}
 }
 
 func extractCustomBody(config string) string {
