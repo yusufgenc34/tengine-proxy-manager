@@ -3,6 +3,7 @@ import { Plus, Trash2, Pencil } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../api/client'
 import TableToolbar from '../components/TableToolbar'
+import PasswordInput from '../components/PasswordInput'
 import Pagination from '../components/Pagination'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Offcanvas from '../components/Offcanvas'
@@ -169,7 +170,7 @@ export default function Users() {
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Password {editing && '(leave blank to keep)'}</label>
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" required={!editing} />
+                <PasswordInput value={password} onChange={setPassword} variant="light" required={!editing} placeholder={editing ? 'Leave blank to keep' : 'Password'} />
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Role</label>

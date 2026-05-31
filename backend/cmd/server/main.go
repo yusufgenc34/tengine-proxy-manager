@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"os"
 	"strings"
@@ -19,6 +21,23 @@ func main() {
 	db, err := database.Connect()
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// Generate setup key if not exists
+	setupKeyPath := "/app/setup.key"
+	if _, err := os.Stat(setupKeyPath); os.IsNotExist(err) {
+		key := make([]byte, 24) // 48 hex chars
+		if _, err := rand.Read(key); err != nil {
+			log.Fatal("failed to generate setup key: ", err)
+		}
+		encoded := hex.EncodeToString(key)
+		if err := os.WriteFile(setupKeyPath, []byte(encoded), 0600); err != nil {
+			log.Fatal("failed to write setup key: ", err)
+		}
+		log.Println("============================================")
+		log.Println("  SETUP KEY: " + encoded)
+		log.Println("  Keep this key — required for initial setup.")
+		log.Println("============================================")
 	}
 
 	// Write initial Cloudflare config (disabled) so tengine doesn't fail on include

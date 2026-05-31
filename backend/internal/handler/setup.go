@@ -2,12 +2,16 @@ package handler
 
 import (
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"golang.org/x/crypto/bcrypt"
 
 	"tpm/internal/model"
 )
+
+const setupKeyPath = "/app/setup.key"
 
 // GetSetupStatus returns whether initial setup has been completed
 func (h *Handler) GetSetupStatus(c echo.Context) error {
@@ -35,10 +39,26 @@ func (h *Handler) InitialSetup(c echo.Context) error {
 	var body struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		SetupKey string `json:"setup_key"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return c.JSON(http.StatusBadRequest, model.APIError{
 			Error: true, Message: "Invalid request", Code: "BAD_REQUEST",
+		})
+	}
+
+	// Validate setup key
+	expectedKey, err := os.ReadFile(setupKeyPath)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, model.APIError{
+			Error: true, Message: "Setup key not found on server", Code: "SETUP_KEY_ERROR",
+		})
+	}
+	if strings.TrimSpace(body.SetupKey) != strings.TrimSpace(string(expectedKey)) {
+		return c.JSON(http.StatusForbidden, model.APIError{
+			Error:   true,
+			Message: "Invalid setup key",
+			Code:    "INVALID_SETUP_KEY",
 		})
 	}
 

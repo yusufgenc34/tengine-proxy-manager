@@ -6,9 +6,20 @@ backend/tmp/
 backend/server
 frontend/dist/
 
+# Go
+*.exe
+*.test
+*.out
+
+# Air (Go hot-reload)
+tmp/
+
 # Environment
 .env
 !.env.example
+
+# Setup key (Docker-generated, local copy)
+backend/setup.key
 
 # IDE
 .idea/
@@ -21,12 +32,8 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 
-# Docker
+# Docker volumes
 postgres_data/
 
 # Logs
 *.log
-
-# Certificates (generated at runtime)
-/etc/letsencrypt/
-package-lock.json

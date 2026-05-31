@@ -13,12 +13,13 @@ import Certificates from './pages/Certificates'
 import AccessLists from './pages/AccessLists'
 import Users from './pages/Users'
 import AuditLogs from './pages/AuditLogs'
-import Security from './pages/Security'
+import Account from './pages/Account'
 import Settings from './pages/Settings'
 import DefaultServer from './pages/settings/DefaultServer'
 import CloudflareIP from './pages/settings/CloudflareIP'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
+import NotFound from './pages/NotFound'
 
 function ProtectedLayout() {
   const { isAuthenticated, logout } = useAuthStore()
@@ -53,10 +54,11 @@ function ProtectedLayout() {
             <Route path="/access-lists" element={<AccessLists />} />
             <Route path="/users" element={<Users />} />
             <Route path="/audit-logs" element={<AuditLogs />} />
-            <Route path="/security" element={<Security />} />
+            <Route path="/account" element={<Account />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/settings/default-server" element={<DefaultServer />} />
             <Route path="/settings/cloudflare" element={<CloudflareIP />} />
+            <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
       </div>

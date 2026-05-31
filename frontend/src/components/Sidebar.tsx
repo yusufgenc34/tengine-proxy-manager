@@ -10,8 +10,8 @@ import {
   X,
   LogOut,
   User,
+  UserCog,
   ChevronUp,
-  Fingerprint,
   Settings,
 } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
@@ -65,10 +65,10 @@ export default function Sidebar({ open, onClose }: Props) {
             {userOpen && (
               <div className="absolute bottom-full left-0 right-0 mb-1 mx-2 bg-gray-800 rounded-lg border border-gray-700 shadow-lg overflow-hidden">
                 <button
-                  onClick={() => { navigate('/security'); setUserOpen(false); onClose() }}
+                  onClick={() => { navigate('/account'); setUserOpen(false); onClose() }}
                   className="flex items-center gap-2 w-full px-3 py-2.5 text-sm text-gray-300 hover:bg-gray-700 transition-colors"
                 >
-                  <Fingerprint size={16} /> Security
+                  <UserCog size={16} /> Account
                 </button>
                 <button onClick={() => { logout(); setUserOpen(false) }}
                   className="flex items-center gap-2 w-full px-3 py-2.5 text-sm text-gray-300 hover:bg-gray-700 hover:text-red-400 transition-colors">

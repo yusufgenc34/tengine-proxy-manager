@@ -3,8 +3,9 @@ import { ShieldCheck, ShieldOff, Copy, Check, KeyRound, ChevronDown } from 'luci
 import toast from 'react-hot-toast'
 import api from '../api/client'
 import { useAuthStore } from '../store/auth'
+import PasswordInput from '../components/PasswordInput'
 
-export default function Security() {
+export default function Account() {
   const { checkAuth } = useAuthStore()
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [twofaOpen, setTwofaOpen] = useState(false)
@@ -49,6 +50,11 @@ export default function Security() {
     finally { setSaving(false) }
   }
 
+  const handleGeneratePassword = (pw: string) => {
+    setNewPassword(pw)
+    setConfirmPassword(pw)
+  }
+
   const handlePasswordChange = async (e: FormEvent) => {
     e.preventDefault()
     if (newPassword !== confirmPassword) { toast.error('Passwords do not match'); return }
@@ -63,7 +69,7 @@ export default function Security() {
 
   return (
     <div className="max-w-2xl">
-      <h2 className="text-2xl font-bold mb-6">Security</h2>
+      <h2 className="text-2xl font-bold mb-6">Account</h2>
       <div className="space-y-3">
         {/* Password */}
         <div className="bg-white rounded-xl shadow overflow-hidden">
@@ -75,7 +81,7 @@ export default function Security() {
           {passwordOpen && (
             <form onSubmit={handlePasswordChange} className="px-5 pb-5 space-y-3 border-t">
               <div className="pt-4"><label className="block text-xs font-medium text-gray-500 mb-1">Current Password</label><input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" required /></div>
-              <div className="grid grid-cols-2 gap-3"><div><label className="block text-xs font-medium text-gray-500 mb-1">New Password</label><input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" minLength={8} required /></div><div><label className="block text-xs font-medium text-gray-500 mb-1">Confirm</label><input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" minLength={8} required /></div></div>
+              <div className="grid grid-cols-2 gap-3"><div><label className="block text-xs font-medium text-gray-500 mb-1">New Password</label><PasswordInput value={newPassword} onChange={setNewPassword} onGenerate={handleGeneratePassword} variant="light" minLength={8} required /></div><div><label className="block text-xs font-medium text-gray-500 mb-1">Confirm</label><PasswordInput value={confirmPassword} onChange={setConfirmPassword} variant="light" minLength={8} required hideGenerate /></div></div>
               <div className="flex justify-end pt-1"><button type="submit" disabled={pwSaving} className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-50">{pwSaving ? 'Changing...' : 'Change Password'}</button></div>
             </form>
           )}
