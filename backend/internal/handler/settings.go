@@ -8,21 +8,24 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	"net/url"
+	"path/filepath"
 	"tpm/internal/model"
+	"tpm/internal/service"
 )
 
-const defaultConfPath = "/etc/tengine/conf.d/000-default.conf"
+func defaultConfPath() string { return filepath.Join(service.ConfigDir(), "000-default.conf") }
 
 func (h *Handler) GetDefaultServer(c echo.Context) error {
 	status := "444"
 	body := ""
-	data, err := os.ReadFile(defaultConfPath)
+	data, err := os.ReadFile(defaultConfPath())
 	if err == nil {
 		s := string(data)
 		if strings.Contains(s, "return 301 ") {
 			status = "301"
 			body = extractReturnValue(s, "301")
-		} else if strings.Contains(s, "return 403;") {
+		} else if strings.Contains(s, "        return 403;\n    }") {
 			status = "403"
 		} else if strings.Contains(s, "return 404;") {
 			status = "404"
@@ -33,7 +36,15 @@ func (h *Handler) GetDefaultServer(c echo.Context) error {
 		} else {
 			// Custom body (200) — extract HTML from the config
 			status = "200"
-			body = extractCustomBody(s)
+			if strings.Contains(s, "# TPM_CUSTOM_BODY") {
+				html, readErr := os.ReadFile(filepath.Join(service.ConfigDir(), "000-default.html"))
+				if readErr != nil {
+					return echo.NewHTTPError(http.StatusInternalServerError, "Failed to read default response")
+				}
+				body = string(html)
+			} else {
+				body = extractCustomBody(s)
+			}
 		}
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": status, "body": body})
@@ -49,6 +60,7 @@ func (h *Handler) UpdateDefaultServer(c echo.Context) error {
 	}
 
 	var content string
+	changes := map[string][]byte{"000-default.html": nil}
 	switch req.Status {
 	case "444":
 		content = defaultServerBlock("return 444;\n")
@@ -62,17 +74,23 @@ func (h *Handler) UpdateDefaultServer(c echo.Context) error {
 		if req.Body == "" {
 			return c.JSON(http.StatusBadRequest, model.APIError{Error: true, Message: "Redirect URL required", Code: "VALIDATION_ERROR"})
 		}
-		content = defaultServerBlock("return 301 " + req.Body + ";\n")
+		u, err := url.Parse(req.Body)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || strings.ContainsAny(req.Body, "\r\n;{}\\\"'$") {
+			return echo.NewHTTPError(http.StatusBadRequest, "Invalid redirect URL")
+		}
+		content = defaultServerBlock("return 301 \"" + req.Body + "\";\n")
 	case "200":
 		if req.Body == "" {
 			return c.JSON(http.StatusBadRequest, model.APIError{Error: true, Message: "Body is required for status 200", Code: "VALIDATION_ERROR"})
 		}
-		content = customBodyBlock(req.Body)
+		content = customBodyBlock()
+		changes["000-default.html"] = []byte(req.Body)
 	default:
 		return c.JSON(http.StatusBadRequest, model.APIError{Error: true, Message: "Invalid status", Code: "VALIDATION_ERROR"})
 	}
 
-	if err := os.WriteFile(defaultConfPath, []byte(content), 0644); err != nil {
+	changes["000-default.conf"] = []byte(content)
+	if err := h.tengine.Apply(changes); err != nil {
 		return c.JSON(http.StatusInternalServerError, model.APIError{Error: true, Message: "Failed to write config", Code: "STORAGE_ERROR"})
 	}
 
@@ -102,28 +120,9 @@ server {
 `
 }
 
-func customBodyBlock(html string) string {
-	// Escape single quotes for nginx return directive
-	escaped := strings.ReplaceAll(html, "'", "'\\''")
-	return `# Auto-generated custom response — do not edit
-server {
-    listen 80 default_server;
-    server_name _;
-
-    location ^~ /.well-known/acme-challenge/ {
-        allow all;
-        root /etc/tengine/html;
-    }
-
-    location / {
-        if ($cf_allow = 0) {
-            return 403;
-        }
-        default_type text/html;
-        return 200 '` + escaped + `';
-    }
-}
-`
+func customBodyBlock() string {
+	// Serve the body as a file so quotes, dollar signs and newlines are literal.
+	return "# TPM_CUSTOM_BODY\n" + defaultServerBlock(fmt.Sprintf("default_type text/html;\n        root %q;\n        try_files /000-default.html =404;\n", service.ConfigDir()))
 }
 
 func extractReturnValue(config, code string) string {
@@ -138,7 +137,7 @@ func extractReturnValue(config, code string) string {
 	if end := strings.Index(s, ";"); end != -1 {
 		s = s[:end]
 	}
-	return s
+	return strings.Trim(s, "\"")
 }
 
 // GetCloudflareSettings returns Cloudflare IP whitelist configuration.
@@ -177,9 +176,6 @@ func (h *Handler) UpdateCloudflareSettings(c echo.Context) error {
 		})
 	}
 
-	// Regenerate all proxy host configs to apply Cloudflare IP whitelist changes
-	h.regenerateAllProxyHosts()
-
 	h.audit.Log(userIDFromContext(c), clientIP(c), "settings.cloudflare",
 		fmt.Sprintf("Cloudflare IP whitelist %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]))
 
@@ -202,8 +198,6 @@ func (h *Handler) RefreshCloudflareIPs(c echo.Context) error {
 
 	cfg, _ := h.cf.GetSettings()
 
-	h.regenerateAllProxyHosts()
-
 	h.audit.Log(userIDFromContext(c), clientIP(c), "settings.cloudflare.refresh", "Manual IP refresh")
 
 	return c.JSON(http.StatusOK, map[string]any{
@@ -213,59 +207,6 @@ func (h *Handler) RefreshCloudflareIPs(c echo.Context) error {
 		"last_fetched": cfg.LastFetched,
 		"updated_at":   cfg.UpdatedAt,
 	})
-}
-
-// regenerateDefaultServer rewrites the default server config from current settings.
-func (h *Handler) regenerateDefaultServer(cfg *model.CloudflareSettings) {
-	// Read current status and body from existing config
-	status := "444"
-	body := ""
-	data, err := os.ReadFile(defaultConfPath)
-	if err == nil {
-		s := string(data)
-		if strings.Contains(s, "return 301 ") {
-			status = "301"
-			body = extractReturnValue(s, "301")
-		} else if strings.Contains(s, "return 403;") {
-			status = "403"
-		} else if strings.Contains(s, "return 404;") {
-			status = "404"
-		} else if strings.Contains(s, "return 502;") {
-			status = "502"
-		} else if strings.Contains(s, "return 200 '") {
-			status = "200"
-			body = extractCustomBody(s)
-		}
-	}
-
-	var content string
-	switch status {
-	case "301":
-		content = defaultServerBlock("return 301 " + body + ";\n")
-	case "200":
-		content = customBodyBlock(body)
-	default:
-		content = defaultServerBlock("return " + status + ";\n")
-	}
-
-	os.WriteFile(defaultConfPath, []byte(content), 0644)
-}
-
-// regenerateAllProxyHosts regenerates config files for all proxy hosts.
-// This ensures template changes (like cloudflare-ips.conf include) are applied.
-func (h *Handler) regenerateAllProxyHosts() {
-	if h.tengine == nil {
-		return
-	}
-
-	var hosts []model.ProxyHost
-	h.db.Preload("Certificate").Preload("AccessList").Find(&hosts)
-
-	for _, host := range hosts {
-		if host.Enabled {
-			h.tengine.GenerateAndReload(host)
-		}
-	}
 }
 
 func extractCustomBody(config string) string {

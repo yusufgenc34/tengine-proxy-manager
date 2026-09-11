@@ -43,12 +43,7 @@ func isValidLoadBalancing(lb string) bool {
 }
 
 func sanitizeDomain(domain string) string {
-	// Remove any path traversal attempts
-	domain = strings.ReplaceAll(domain, "..", "")
-	domain = strings.ReplaceAll(domain, "/", "")
-	domain = strings.ReplaceAll(domain, "\\", "")
-	domain = strings.ReplaceAll(domain, " ", "")
-	return strings.ToLower(domain)
+	return strings.ToLower(strings.TrimSpace(domain))
 }
 
 func isValidAccessListRules(rules string) bool {
@@ -77,7 +72,7 @@ func isValidAccessListRules(rules string) bool {
 }
 
 func isValidPassword(password string) bool {
-	return len(password) >= 8
+	return len(password) >= 8 && len(password) <= 72
 }
 
 // ParseAccessListExpression converts a Cloudflare-style expression to JSON rules.

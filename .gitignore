@@ -37,3 +37,6 @@ postgres_data/
 
 # Logs
 *.log
+
+# TypeScript incremental cache
+*.tsbuildinfo

@@ -4,7 +4,7 @@ upstream backend_{{ .Domain | printf "%s" }} {
     {{- if eq .LoadBalancing "least_conn" }}
     least_conn;
     {{- else if eq .LoadBalancing "consistent_hash" }}
-    consistent_hash $request_uri;
+    hash $request_uri consistent;
     {{- end }}
     {{- if .HealthCheck }}
 

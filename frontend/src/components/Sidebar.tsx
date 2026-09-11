@@ -32,7 +32,7 @@ interface Props {
 }
 
 export default function Sidebar({ open, onClose }: Props) {
-  const { email, logout } = useAuthStore()
+  const { email, role, logout } = useAuthStore()
   const navigate = useNavigate()
   const [userOpen, setUserOpen] = useState(false)
 
@@ -49,7 +49,7 @@ export default function Sidebar({ open, onClose }: Props) {
         </div>
 
         <nav className="flex-1 p-2 overflow-y-auto">
-          {navItems.map(({ to, icon: Icon, label }) => (
+          {navItems.filter(item => role === 'admin' || !['/users', '/audit-logs', '/settings'].includes(item.to)).map(({ to, icon: Icon, label }) => (
             <NavLink key={to} to={to} end={to === '/'} onClick={onClose}
               className={({ isActive }) =>
                 `flex items-center gap-3 px-3 py-2 rounded-lg mb-1 transition-colors ${

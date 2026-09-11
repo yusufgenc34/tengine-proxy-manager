@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Download, Copy, Check, Monitor } from 'lucide-react'
 import toast from 'react-hot-toast'
+import api from '../api/client'
 
 interface Props {
   domain: string
@@ -19,7 +20,6 @@ export default function DownloadGuideDialog({ domain, certId, onClose }: Props) 
   const fetchAndDownload = async () => {
     setLoading(true)
     try {
-      const { default: api } = await import('../api/client')
       const { data } = await api.get(`/certificates/${certId}/download`)
       setCertContent(data.cert_content)
       setKeyContent(data.key_content)

@@ -100,24 +100,13 @@ func (h *Handler) Verify2FALogin(c echo.Context) error {
 		})
 	}
 
-	token, err := jwt.ParseWithClaims(req.TempToken, &mw.JWTClaims{}, func(t *jwt.Token) (any, error) {
-		return []byte(os.Getenv("JWT_SECRET")), nil
-	})
-	if err != nil || !token.Valid {
-		return c.JSON(http.StatusUnauthorized, model.APIError{
-			Error: true, Message: "Invalid or expired temp token", Code: "INVALID_TEMP_TOKEN",
-		})
-	}
-
-	claims := token.Claims.(*mw.JWTClaims)
-	if claims.TokenType != "2fa_temp" {
-		return c.JSON(http.StatusUnauthorized, model.APIError{
-			Error: true, Message: "Invalid token type", Code: "INVALID_TOKEN_TYPE",
-		})
+	claims, err := mw.ParseToken(req.TempToken, mw.TempToken)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or expired temporary token")
 	}
 
 	var user model.User
-	if err := h.db.First(&user, claims.UserID).Error; err != nil {
+	if err := h.db.First(&user, claims.UserID).Error; err != nil || user.TokenVersion != claims.TokenVersion {
 		return c.JSON(http.StatusUnauthorized, model.APIError{
 			Error: true, Message: "User not found", Code: "USER_NOT_FOUND",
 		})
@@ -135,14 +124,14 @@ func (h *Handler) Verify2FALogin(c echo.Context) error {
 }
 
 func (h *Handler) issueTokens(c echo.Context, user model.User) error {
-	accessToken, err := generateToken(user, 15*time.Minute)
+	accessToken, err := generateToken(user, mw.AccessToken, 15*time.Minute)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, model.APIError{
 			Error: true, Message: "Failed to generate token", Code: "TOKEN_ERROR",
 		})
 	}
 
-	refreshToken, err := generateToken(user, 7*24*time.Hour)
+	refreshToken, err := generateToken(user, mw.RefreshToken, 7*24*time.Hour)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, model.APIError{
 			Error: true, Message: "Failed to generate token", Code: "TOKEN_ERROR",
@@ -168,21 +157,13 @@ func (h *Handler) Refresh(c echo.Context) error {
 		})
 	}
 
-	token, err := jwt.ParseWithClaims(body.RefreshToken, &mw.JWTClaims{}, func(t *jwt.Token) (any, error) {
-		return []byte(os.Getenv("JWT_SECRET")), nil
-	})
-	if err != nil || !token.Valid {
-		return c.JSON(http.StatusUnauthorized, model.APIError{
-			Error:   true,
-			Message: "Invalid refresh token",
-			Code:    "INVALID_REFRESH_TOKEN",
-		})
+	claims, err := mw.ParseToken(body.RefreshToken, mw.RefreshToken)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or expired refresh token")
 	}
 
-	claims := token.Claims.(*mw.JWTClaims)
-
 	var user model.User
-	if err := h.db.First(&user, claims.UserID).Error; err != nil {
+	if err := h.db.First(&user, claims.UserID).Error; err != nil || user.TokenVersion != claims.TokenVersion {
 		return c.JSON(http.StatusUnauthorized, model.APIError{
 			Error:   true,
 			Message: "User not found",
@@ -190,7 +171,7 @@ func (h *Handler) Refresh(c echo.Context) error {
 		})
 	}
 
-	accessToken, err := generateToken(user, 15*time.Minute)
+	accessToken, err := generateToken(user, mw.AccessToken, 15*time.Minute)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, model.APIError{
 			Error:   true,
@@ -248,9 +229,9 @@ func (h *Handler) Setup2FA(c echo.Context) error {
 	qrBase64 := base64.StdEncoding.EncodeToString(buf.Bytes())
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"secret":   key.Secret(),
-		"qr_code":  "data:image/png;base64," + qrBase64,
-		"otpauth":  key.URL(),
+		"secret":  key.Secret(),
+		"qr_code": "data:image/png;base64," + qrBase64,
+		"otpauth": key.URL(),
 	})
 }
 
@@ -369,7 +350,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		})
 	}
 
-	if len(body.NewPassword) < 8 {
+	if !isValidPassword(body.NewPassword) {
 		return c.JSON(http.StatusBadRequest, model.APIError{
 			Error: true, Message: "New password must be at least 8 characters", Code: "VALIDATION_ERROR",
 		})
@@ -395,17 +376,21 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		})
 	}
 
-	h.db.Model(&user).Update("password", string(hashed))
+	if err := h.db.Model(&user).Updates(map[string]any{"password": string(hashed), "token_version": user.TokenVersion + 1}).Error; err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to update password")
+	}
 	h.audit.Log(&user.ID, clientIP(c), "password.changed", "Password changed for: "+user.Email)
 
 	return c.JSON(http.StatusOK, map[string]any{"message": "Password changed successfully"})
 }
 
-func generateToken(user model.User, duration time.Duration) (string, error) {
+func generateToken(user model.User, kind string, duration time.Duration) (string, error) {
 	claims := mw.JWTClaims{
-		UserID: user.ID,
-		Email:  user.Email,
-		Role:   user.Role,
+		UserID:       user.ID,
+		Email:        user.Email,
+		Role:         user.Role,
+		TokenType:    kind,
+		TokenVersion: user.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(duration)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -418,10 +403,11 @@ func generateToken(user model.User, duration time.Duration) (string, error) {
 
 func generateTempToken(user model.User) (string, error) {
 	claims := mw.JWTClaims{
-		UserID:    user.ID,
-		Email:     user.Email,
-		Role:      user.Role,
-		TokenType: "2fa_temp",
+		UserID:       user.ID,
+		Email:        user.Email,
+		Role:         user.Role,
+		TokenType:    mw.TempToken,
+		TokenVersion: user.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(5 * time.Minute)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

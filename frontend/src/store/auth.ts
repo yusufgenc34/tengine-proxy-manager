@@ -3,6 +3,7 @@ import api from '../api/client'
 
 interface AuthState {
   isAuthenticated: boolean
+  role: string | null
   email: string | null
   loading: boolean
   twoFactorRequired: boolean
@@ -14,12 +15,12 @@ interface AuthState {
   cancel2FA: () => void
 }
 
-function getEmailFromToken(): string | null {
+function getClaimFromToken(name: string): string | null {
   const token = localStorage.getItem('access_token')
   if (!token) return null
   try {
     const payload = JSON.parse(atob(token.split('.')[1]))
-    return payload.email || null
+    return payload[name] || null
   } catch {
     return null
   }
@@ -27,7 +28,8 @@ function getEmailFromToken(): string | null {
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   isAuthenticated: !!localStorage.getItem('access_token'),
-  email: getEmailFromToken(),
+  email: getClaimFromToken('email'),
+  role: getClaimFromToken('role'),
   loading: false,
   twoFactorRequired: false,
   tempToken: null,
@@ -42,7 +44,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
       localStorage.setItem('access_token', data.access_token)
       localStorage.setItem('refresh_token', data.refresh_token)
-      set({ isAuthenticated: true, email, twoFactorRequired: false, tempToken: null })
+      set({ isAuthenticated: true, role: getClaimFromToken('role'), email, twoFactorRequired: false, tempToken: null })
     } finally {
       set({ loading: false })
     }
@@ -58,7 +60,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       })
       localStorage.setItem('access_token', data.access_token)
       localStorage.setItem('refresh_token', data.refresh_token)
-      set({ isAuthenticated: true, email, twoFactorRequired: false, tempToken: null })
+      set({ isAuthenticated: true, role: getClaimFromToken('role'), email, twoFactorRequired: false, tempToken: null })
     } finally {
       set({ loading: false })
     }
@@ -71,10 +73,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   logout: () => {
     localStorage.removeItem('access_token')
     localStorage.removeItem('refresh_token')
-    set({ isAuthenticated: false, email: null, twoFactorRequired: false, tempToken: null })
+    set({ isAuthenticated: false, role: null, email: null, twoFactorRequired: false, tempToken: null })
   },
 
   checkAuth: () => {
-    set({ isAuthenticated: !!localStorage.getItem('access_token'), email: getEmailFromToken() })
+    set({ isAuthenticated: !!localStorage.getItem('access_token'), email: getClaimFromToken('email'), role: getClaimFromToken('role') })
   },
 }))

@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	"gorm.io/gorm"
 	"tpm/internal/model"
 )
 
@@ -70,13 +71,20 @@ func (h *Handler) ListAccessLists(c echo.Context) error {
 }
 
 func (h *Handler) CreateAccessList(c echo.Context) error {
-	var list model.AccessList
-	if err := c.Bind(&list); err != nil {
+	var input struct {
+		Name  string `json:"name"`
+		Rules string `json:"rules"`
+	}
+	if err := c.Bind(&input); err != nil {
 		return c.JSON(http.StatusBadRequest, model.APIError{
 			Error: true, Message: "Invalid request", Code: "BAD_REQUEST",
 		})
 	}
 
+	if input.Rules == "" {
+		input.Rules = "[]"
+	}
+	list := model.AccessList{Name: input.Name, Rules: input.Rules}
 	if list.Name == "" {
 		return c.JSON(http.StatusBadRequest, model.APIError{
 			Error: true, Message: "name is required", Code: "VALIDATION_ERROR",
@@ -114,25 +122,49 @@ func (h *Handler) UpdateAccessList(c echo.Context) error {
 		})
 	}
 
-	var input model.AccessList
+	var input struct {
+		Name  string `json:"name"`
+		Rules string `json:"rules"`
+	}
 	if err := c.Bind(&input); err != nil {
 		return c.JSON(http.StatusBadRequest, model.APIError{
 			Error: true, Message: "Invalid request", Code: "BAD_REQUEST",
 		})
 	}
 
+	if input.Name == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "Name is required")
+	}
+	if input.Rules == "" {
+		input.Rules = "[]"
+	}
 	if !isValidAccessListRules(input.Rules) {
 		return c.JSON(http.StatusBadRequest, model.APIError{Error: true, Message: "Invalid rules format. Each rule must have a valid IP/CIDR and action (allow/deny)", Code: "VALIDATION_ERROR"})
 	}
 
-	h.db.Model(&list).Updates(input)
-	h.db.Preload("ProxyHosts.Certificate").Preload("ProxyHosts.AccessList").First(&list, id)
-
-	// Regenerate configs for all proxy hosts using this access list
-	if h.tengine != nil {
-		for _, host := range list.ProxyHosts {
-			h.tengine.GenerateAndReload(host)
+	err = h.tengine.Transaction(h.db, func(tx *gorm.DB) (map[string][]byte, error) {
+		if err := tx.Model(&list).Updates(map[string]any{"name": input.Name, "rules": input.Rules}).Error; err != nil {
+			return nil, err
 		}
+		var hosts []model.ProxyHost
+		if err := tx.Where("access_list_id = ?", id).Find(&hosts).Error; err != nil {
+			return nil, err
+		}
+		changes := map[string][]byte{}
+		for i := range hosts {
+			if err := h.prepareProxy(tx, &hosts[i]); err != nil {
+				return nil, err
+			}
+			data, err := h.tengine.Render(hosts[i])
+			if err != nil {
+				return nil, err
+			}
+			changes[hosts[i].Domain+".conf"] = data
+		}
+		return changes, nil
+	})
+	if err != nil {
+		return configError(err)
 	}
 
 	h.audit.Log(userIDFromContext(c), clientIP(c), "access_list.update",

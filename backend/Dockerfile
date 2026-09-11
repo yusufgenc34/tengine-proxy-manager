@@ -7,7 +7,7 @@ RUN go build -o tpm ./cmd/server/
 
 FROM alpine:3.19
 RUN apk --no-cache add ca-certificates tzdata certbot
-WORKDIR /root/
+WORKDIR /app
 COPY --from=builder /app/tpm .
 COPY --from=builder /app/templates ./templates
 EXPOSE 4000

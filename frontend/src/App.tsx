@@ -22,7 +22,7 @@ import Setup from './pages/Setup'
 import NotFound from './pages/NotFound'
 
 function ProtectedLayout() {
-  const { isAuthenticated, logout } = useAuthStore()
+  const { isAuthenticated, role, logout } = useAuthStore()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const handleIdle = useCallback(() => {
@@ -52,12 +52,12 @@ function ProtectedLayout() {
             <Route path="/proxy-hosts" element={<ProxyHosts />} />
             <Route path="/certificates" element={<Certificates />} />
             <Route path="/access-lists" element={<AccessLists />} />
-            <Route path="/users" element={<Users />} />
-            <Route path="/audit-logs" element={<AuditLogs />} />
+            <Route path="/users" element={role === 'admin' ? <Users /> : <Navigate to="/" replace />} />
+            <Route path="/audit-logs" element={role === 'admin' ? <AuditLogs /> : <Navigate to="/" replace />} />
             <Route path="/account" element={<Account />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="/settings/default-server" element={<DefaultServer />} />
-            <Route path="/settings/cloudflare" element={<CloudflareIP />} />
+            <Route path="/settings" element={role === 'admin' ? <Settings /> : <Navigate to="/" replace />} />
+            <Route path="/settings/default-server" element={role === 'admin' ? <DefaultServer /> : <Navigate to="/" replace />} />
+            <Route path="/settings/cloudflare" element={role === 'admin' ? <CloudflareIP /> : <Navigate to="/" replace />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>

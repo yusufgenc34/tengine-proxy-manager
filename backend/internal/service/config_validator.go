@@ -36,10 +36,13 @@ func NewConfigValidator(db *gorm.DB) *ConfigValidator {
 }
 
 // ValidateProxyHost checks whether a proxy host's SSL certificate files exist on disk.
-// Call before GenerateAndReload to prevent tengine from crashing on missing certs.
+// Call before rendering to reject missing certificates before changing state.
 func (v *ConfigValidator) ValidateProxyHost(host *model.ProxyHost) error {
-	if !host.SslEnabled || host.Certificate == nil {
+	if !host.Enabled || !host.SslEnabled {
 		return nil
+	}
+	if host.Certificate == nil || host.Certificate.CertPath == "" || host.Certificate.KeyPath == "" {
+		return fmt.Errorf("an SSL certificate and key are required")
 	}
 
 	cert := host.Certificate
@@ -87,7 +90,7 @@ func (v *ConfigValidator) ValidateAll() SystemHealth {
 			health.Checks = append(health.Checks, CheckResult{
 				Type: "cert_file", Domain: host.Domain, Status: "missing",
 				Message: fmt.Sprintf("SSL certificate missing for %s", host.Domain),
-				Path: fullchain,
+				Path:    fullchain,
 			})
 		}
 		if !keyOK {
@@ -95,7 +98,7 @@ func (v *ConfigValidator) ValidateAll() SystemHealth {
 			health.Checks = append(health.Checks, CheckResult{
 				Type: "cert_file", Domain: host.Domain, Status: "missing",
 				Message: fmt.Sprintf("SSL key missing for %s", host.Domain),
-				Path: privkey,
+				Path:    privkey,
 			})
 		}
 		if certOK && keyOK {

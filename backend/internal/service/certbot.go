@@ -185,10 +185,21 @@ func (s *CertbotService) GenerateSelfSigned(domain string) (*model.Certificate, 
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
 
-	certDir := filepath.Join("/etc/letsencrypt/self-signed", domain)
-	if err := os.MkdirAll(certDir, 0700); err != nil {
+	base := "/etc/letsencrypt/self-signed"
+	if err := os.MkdirAll(base, 0700); err != nil {
 		return nil, "", "", fmt.Errorf("sertifika dizini oluşturulamadı: %w", err)
 	}
+
+	certDir, err := os.MkdirTemp(base, "cert-")
+	if err != nil {
+		return nil, "", "", err
+	}
+	saved := false
+	defer func() {
+		if !saved {
+			os.RemoveAll(certDir)
+		}
+	}()
 
 	certPath := filepath.Join(certDir, "fullchain.pem")
 	keyPath := filepath.Join(certDir, "privkey.pem")
@@ -213,5 +224,6 @@ func (s *CertbotService) GenerateSelfSigned(domain string) (*model.Certificate, 
 		return nil, "", "", fmt.Errorf("sertifika veritabanına kaydedilemedi: %w", err)
 	}
 
+	saved = true
 	return cert, string(certPEM), string(keyPEM), nil
 }

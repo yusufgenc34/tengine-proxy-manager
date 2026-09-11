@@ -51,6 +51,8 @@ func (h *Handler) ListUsers(c echo.Context) error {
 }
 
 func (h *Handler) CreateUser(c echo.Context) error {
+	h.userMu.Lock()
+	defer h.userMu.Unlock()
 	var body struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
@@ -86,6 +88,9 @@ func (h *Handler) CreateUser(c echo.Context) error {
 	if role == "" {
 		role = "user"
 	}
+	if role != "admin" && role != "user" {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid role")
+	}
 
 	user := model.User{
 		Email:    body.Email,
@@ -106,6 +111,8 @@ func (h *Handler) CreateUser(c echo.Context) error {
 }
 
 func (h *Handler) UpdateUser(c echo.Context) error {
+	h.userMu.Lock()
+	defer h.userMu.Unlock()
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, model.APIError{
@@ -131,6 +138,24 @@ func (h *Handler) UpdateUser(c echo.Context) error {
 		})
 	}
 
+	if body.Email != "" && !isValidEmail(body.Email) {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid email")
+	}
+	if body.Password != "" && !isValidPassword(body.Password) {
+		return echo.NewHTTPError(http.StatusBadRequest, "Password must contain 8 to 72 bytes")
+	}
+	if body.Role != "" && body.Role != "admin" && body.Role != "user" {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid role")
+	}
+	if user.Role == "admin" && body.Role == "user" {
+		var count int64
+		if err := h.db.Model(&model.User{}).Where("role = ?", "admin").Count(&count).Error; err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "Failed to check administrators")
+		}
+		if count <= 1 {
+			return echo.NewHTTPError(http.StatusConflict, "The last administrator cannot be demoted")
+		}
+	}
 	if body.Email != "" {
 		user.Email = body.Email
 	}
@@ -147,7 +172,12 @@ func (h *Handler) UpdateUser(c echo.Context) error {
 		user.Password = string(hashed)
 	}
 
-	h.db.Save(&user)
+	if body.Password != "" || body.Role != "" {
+		user.TokenVersion++
+	}
+	if err := h.db.Save(&user).Error; err != nil {
+		return echo.NewHTTPError(http.StatusConflict, "Failed to update user")
+	}
 
 	h.audit.Log(userIDFromContext(c), clientIP(c), "user.update",
 		fmt.Sprintf("ID: %d, Email: %s", id, user.Email))
@@ -156,6 +186,8 @@ func (h *Handler) UpdateUser(c echo.Context) error {
 }
 
 func (h *Handler) DeleteUser(c echo.Context) error {
+	h.userMu.Lock()
+	defer h.userMu.Unlock()
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, model.APIError{
@@ -170,7 +202,21 @@ func (h *Handler) DeleteUser(c echo.Context) error {
 		})
 	}
 
-	h.db.Delete(&user, id)
+	if user.ID == c.Get("user_id").(uint) {
+		return echo.NewHTTPError(http.StatusConflict, "You cannot delete your own account")
+	}
+	if user.Role == "admin" {
+		var count int64
+		if err := h.db.Model(&model.User{}).Where("role = ?", "admin").Count(&count).Error; err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "Failed to check administrators")
+		}
+		if count <= 1 {
+			return echo.NewHTTPError(http.StatusConflict, "The last administrator cannot be deleted")
+		}
+	}
+	if err := h.db.Delete(&user, id).Error; err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to delete user")
+	}
 
 	h.audit.Log(userIDFromContext(c), clientIP(c), "user.delete",
 		fmt.Sprintf("ID: %d, Email: %s", id, user.Email))

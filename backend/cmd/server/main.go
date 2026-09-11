@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,17 +15,22 @@ import (
 	"tpm/internal/database"
 	"tpm/internal/handler"
 	mw "tpm/internal/middleware"
-	"tpm/internal/service"
 )
 
 func main() {
+	if len(os.Getenv("JWT_SECRET")) < 32 {
+		log.Fatal("JWT_SECRET must contain at least 32 bytes")
+	}
 	db, err := database.Connect()
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Generate setup key if not exists
-	setupKeyPath := "/app/setup.key"
+	setupKeyPath := handler.SetupKeyPath()
+	if err := os.MkdirAll(filepath.Dir(setupKeyPath), 0700); err != nil {
+		log.Fatal(err)
+	}
 	if _, err := os.Stat(setupKeyPath); os.IsNotExist(err) {
 		key := make([]byte, 24) // 48 hex chars
 		if _, err := rand.Read(key); err != nil {
@@ -39,9 +45,6 @@ func main() {
 		log.Println("  Keep this key — required for initial setup.")
 		log.Println("============================================")
 	}
-
-	// Write initial Cloudflare config (disabled) so tengine doesn't fail on include
-	service.WriteCloudflareGeoOff()
 
 	e := echo.New()
 	e.Use(middleware.Logger())
@@ -67,7 +70,13 @@ func main() {
 		MaxAge:           3600,
 	}))
 
-	h := handler.New(db)
+	h, err := handler.New(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := h.InitializeConfig(); err != nil {
+		log.Fatal(err)
+	}
 
 	// Start Cloudflare IP sync (every 7 days)
 	h.StartCloudflareSync(7 * 24 * time.Hour)
@@ -75,8 +84,8 @@ func main() {
 	api := e.Group("/api/v1")
 
 	// Rate limiters
-	loginLimiter := mw.NewRateLimiter(10, 5)  // 10/min, burst 5
-	apiLimiter := mw.NewRateLimiter(120, 30)  // 120/min, burst 30
+	loginLimiter := mw.NewRateLimiter(10, 5) // 10/min, burst 5
+	apiLimiter := mw.NewRateLimiter(120, 30) // 120/min, burst 30
 
 	// Public (with strict rate limiting on auth endpoints)
 	api.GET("/health", h.GetHealth)
@@ -84,10 +93,10 @@ func main() {
 	api.POST("/setup", h.InitialSetup, loginLimiter.Middleware())
 	api.POST("/auth/login", h.Login, loginLimiter.Middleware())
 	api.POST("/auth/2fa/login", h.Verify2FALogin, loginLimiter.Middleware())
-	api.POST("/auth/refresh", h.Refresh)
+	api.POST("/auth/refresh", h.Refresh, loginLimiter.Middleware())
 
 	// Protected (with general rate limiting)
-	r := api.Group("", mw.JWT(), apiLimiter.Middleware())
+	r := api.Group("", mw.JWT(db), apiLimiter.Middleware())
 
 	r.GET("/proxy-hosts", h.ListProxyHosts)
 	r.POST("/proxy-hosts", h.CreateProxyHost)
@@ -100,7 +109,7 @@ func main() {
 	r.POST("/certificates/letsencrypt", h.CreateLetsEncrypt)
 	r.POST("/certificates/custom", h.UploadCustomCert)
 	r.POST("/certificates/self-signed", h.CreateSelfSignedCert)
-	r.GET("/certificates/:id/download", h.DownloadCertificate)
+	r.GET("/certificates/:id/download", h.DownloadCertificate, mw.RequireAdmin)
 	r.DELETE("/certificates/:id", h.DeleteCertificate)
 	r.POST("/certificates/:id/renew", h.RenewCertificate)
 
@@ -110,20 +119,20 @@ func main() {
 	r.PUT("/access-lists/:id", h.UpdateAccessList)
 	r.DELETE("/access-lists/:id", h.DeleteAccessList)
 
-	r.GET("/users", h.ListUsers)
-	r.POST("/users", h.CreateUser)
-	r.PUT("/users/:id", h.UpdateUser)
-	r.DELETE("/users/:id", h.DeleteUser)
+	r.GET("/users", h.ListUsers, mw.RequireAdmin)
+	r.POST("/users", h.CreateUser, mw.RequireAdmin)
+	r.PUT("/users/:id", h.UpdateUser, mw.RequireAdmin)
+	r.DELETE("/users/:id", h.DeleteUser, mw.RequireAdmin)
 
-	r.GET("/settings/default-server", h.GetDefaultServer)
-	r.PUT("/settings/default-server", h.UpdateDefaultServer)
-	r.GET("/settings/cloudflare", h.GetCloudflareSettings)
-	r.PUT("/settings/cloudflare", h.UpdateCloudflareSettings)
-	r.POST("/settings/cloudflare/refresh", h.RefreshCloudflareIPs)
+	r.GET("/settings/default-server", h.GetDefaultServer, mw.RequireAdmin)
+	r.PUT("/settings/default-server", h.UpdateDefaultServer, mw.RequireAdmin)
+	r.GET("/settings/cloudflare", h.GetCloudflareSettings, mw.RequireAdmin)
+	r.PUT("/settings/cloudflare", h.UpdateCloudflareSettings, mw.RequireAdmin)
+	r.POST("/settings/cloudflare/refresh", h.RefreshCloudflareIPs, mw.RequireAdmin)
 
-	r.GET("/audit-logs", h.ListAuditLogs)
-	r.GET("/audit-logs/action-types", h.GetActionTypes)
-	r.DELETE("/audit-logs", h.ClearAuditLogs)
+	r.GET("/audit-logs", h.ListAuditLogs, mw.RequireAdmin)
+	r.GET("/audit-logs/action-types", h.GetActionTypes, mw.RequireAdmin)
+	r.DELETE("/audit-logs", h.ClearAuditLogs, mw.RequireAdmin)
 	r.GET("/stats", h.GetStats)
 
 	// 2FA endpoints (protected)

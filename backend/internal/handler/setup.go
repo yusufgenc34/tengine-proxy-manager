@@ -11,12 +11,19 @@ import (
 	"tpm/internal/model"
 )
 
-const setupKeyPath = "/app/setup.key"
+func SetupKeyPath() string {
+	if path := os.Getenv("SETUP_KEY_PATH"); path != "" {
+		return path
+	}
+	return "setup.key"
+}
 
 // GetSetupStatus returns whether initial setup has been completed
 func (h *Handler) GetSetupStatus(c echo.Context) error {
 	var count int64
-	h.db.Model(&model.User{}).Count(&count)
+	if err := h.db.Model(&model.User{}).Count(&count).Error; err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "Database unavailable")
+	}
 
 	return c.JSON(http.StatusOK, map[string]any{
 		"setup_required": count == 0,
@@ -25,8 +32,12 @@ func (h *Handler) GetSetupStatus(c echo.Context) error {
 
 // InitialSetup creates the first admin user (only works if no users exist)
 func (h *Handler) InitialSetup(c echo.Context) error {
+	h.userMu.Lock()
+	defer h.userMu.Unlock()
 	var count int64
-	h.db.Model(&model.User{}).Count(&count)
+	if err := h.db.Model(&model.User{}).Count(&count).Error; err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "Database unavailable")
+	}
 
 	if count > 0 {
 		return c.JSON(http.StatusForbidden, model.APIError{
@@ -48,7 +59,7 @@ func (h *Handler) InitialSetup(c echo.Context) error {
 	}
 
 	// Validate setup key
-	expectedKey, err := os.ReadFile(setupKeyPath)
+	expectedKey, err := os.ReadFile(SetupKeyPath())
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, model.APIError{
 			Error: true, Message: "Setup key not found on server", Code: "SETUP_KEY_ERROR",
@@ -68,7 +79,7 @@ func (h *Handler) InitialSetup(c echo.Context) error {
 		})
 	}
 
-	if len(body.Password) < 8 {
+	if !isValidPassword(body.Password) || !isValidEmail(body.Email) {
 		return c.JSON(http.StatusBadRequest, model.APIError{
 			Error: true, Message: "Password must be at least 8 characters", Code: "VALIDATION_ERROR",
 		})

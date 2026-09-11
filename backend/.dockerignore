@@ -1,0 +1,7 @@
+.env
+.env.*
+setup.key
+data
+tmp
+server
+*.test

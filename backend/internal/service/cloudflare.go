@@ -4,156 +4,146 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"tpm/internal/model"
-
 	"gorm.io/gorm"
+	"tpm/internal/model"
 )
 
-const cloudflareGeoPath = "/etc/tengine/conf.d/cloudflare-geo.conf"
-
-// CloudflareService manages the Cloudflare IP whitelist feature.
 type CloudflareService struct {
-	db *gorm.DB
+	db      *gorm.DB
+	tengine *TengineService
 }
 
-func NewCloudflareService(db *gorm.DB) *CloudflareService {
-	return &CloudflareService{db: db}
+func NewCloudflareService(db *gorm.DB, tengine *TengineService) *CloudflareService {
+	return &CloudflareService{db: db, tengine: tengine}
 }
-
-// GetSettings returns the current Cloudflare whitelist settings.
 func (s *CloudflareService) GetSettings() (*model.CloudflareSettings, error) {
 	var cfg model.CloudflareSettings
 	err := s.db.FirstOrCreate(&cfg, model.CloudflareSettings{ID: 1}).Error
 	return &cfg, err
 }
 
-// Toggle enables or disables the Cloudflare IP whitelist.
-func (s *CloudflareService) Toggle(enabled bool) (*model.CloudflareSettings, error) {
+// Restore cached protection before serving requests; network availability never
+// determines whether an enabled whitelist is enforced at startup.
+func (s *CloudflareService) Restore() error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	cfg, err := s.GetSettings()
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	if enabled && cfg.IPv4List == "" && cfg.IPv6List == "" {
-		if err := s.FetchIPs(cfg); err != nil {
-			return nil, fmt.Errorf("failed to fetch Cloudflare IPs: %w", err)
-		}
+	data, err := renderCloudflareGeo(cfg)
+	if err != nil {
+		return err
 	}
-
-	cfg.Enabled = enabled
-	cfg.UpdatedAt = time.Now().UTC()
-	if err := s.db.Save(cfg).Error; err != nil {
-		return nil, err
-	}
-
-	if err := s.writeGeo(cfg); err != nil {
-		return nil, fmt.Errorf("failed to write Cloudflare geo config: %w", err)
-	}
-
-	return cfg, nil
+	return AtomicWrite(filepath.Join(s.tengine.confDir, "cloudflare-geo.conf"), data, 0644)
 }
 
-// FetchIPs fetches the latest Cloudflare IP ranges and updates the database.
-func (s *CloudflareService) FetchIPs(cfg *model.CloudflareSettings) error {
+func renderCloudflareGeo(cfg *model.CloudflareSettings) ([]byte, error) {
+	var out strings.Builder
+	out.WriteString("# Cloudflare IP whitelist\ngeo $cf_allow {\n")
+	if !cfg.Enabled {
+		out.WriteString("    default 1;\n")
+	} else {
+		// An enabled but empty list fails closed.
+		out.WriteString("    default 0;\n")
+		for _, entry := range strings.Fields(cfg.IPv4List + "\n" + cfg.IPv6List) {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return nil, fmt.Errorf("invalid Cloudflare CIDR: %s", entry)
+			}
+			out.WriteString("    " + entry + " 1;\n")
+		}
+	}
+	out.WriteString("}\n")
+	return []byte(out.String()), nil
+}
+
+func (s *CloudflareService) Toggle(enabled bool) (*model.CloudflareSettings, error) {
+	if enabled {
+		cfg, err := s.GetSettings()
+		if err != nil {
+			return nil, err
+		}
+		if cfg.IPv4List == "" && cfg.IPv6List == "" {
+			if err := s.RefreshIPs(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var cfg model.CloudflareSettings
+	err := s.tengine.Transaction(s.db, func(tx *gorm.DB) (map[string][]byte, error) {
+		if err := tx.FirstOrCreate(&cfg, model.CloudflareSettings{ID: 1}).Error; err != nil {
+			return nil, err
+		}
+		cfg.Enabled = enabled
+		cfg.UpdatedAt = time.Now().UTC()
+		data, err := renderCloudflareGeo(&cfg)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Save(&cfg).Error; err != nil {
+			return nil, err
+		}
+		return map[string][]byte{"cloudflare-geo.conf": data}, nil
+	})
+	return &cfg, err
+}
+
+func (s *CloudflareService) RefreshIPs() error {
 	ipv4, err := fetch("https://www.cloudflare.com/ips-v4")
 	if err != nil {
-		return fmt.Errorf("IPv4 fetch failed: %w", err)
+		return err
 	}
 	ipv6, err := fetch("https://www.cloudflare.com/ips-v6")
 	if err != nil {
-		return fmt.Errorf("IPv6 fetch failed: %w", err)
-	}
-
-	cfg.IPv4List = strings.TrimSpace(ipv4)
-	cfg.IPv6List = strings.TrimSpace(ipv6)
-	cfg.LastFetched = time.Now().UTC()
-	cfg.UpdatedAt = time.Now().UTC()
-
-	return s.db.Save(cfg).Error
-}
-
-// RefreshIPs fetches fresh IPs and rewrites the config if enabled.
-func (s *CloudflareService) RefreshIPs() error {
-	cfg, err := s.GetSettings()
-	if err != nil {
 		return err
 	}
-
-	if err := s.FetchIPs(cfg); err != nil {
+	if strings.TrimSpace(ipv4) == "" || strings.TrimSpace(ipv6) == "" {
+		return fmt.Errorf("empty Cloudflare IP response")
+	}
+	candidate := model.CloudflareSettings{Enabled: true, IPv4List: ipv4, IPv6List: ipv6}
+	if _, err := renderCloudflareGeo(&candidate); err != nil {
 		return err
 	}
-
-	if cfg.Enabled {
-		return s.writeGeo(cfg)
-	}
-	return nil
-}
-
-// writeGeo generates the nginx geo block and writes it to disk.
-func (s *CloudflareService) writeGeo(cfg *model.CloudflareSettings) error {
-	var sb strings.Builder
-
-	sb.WriteString("# Cloudflare IP Whitelist — auto-generated, do not edit\n")
-	sb.WriteString("# Last fetched: " + cfg.LastFetched.Format(time.RFC3339) + "\n")
-	sb.WriteString("geo $cf_allow {\n")
-
-	if cfg.Enabled && (cfg.IPv4List != "" || cfg.IPv6List != "") {
-		sb.WriteString("    default 0;\n")
-
-		for _, ip := range strings.Split(cfg.IPv4List, "\n") {
-			ip = strings.TrimSpace(ip)
-			if ip != "" {
-				sb.WriteString("    " + ip + " 1;\n")
-			}
+	return s.tengine.Transaction(s.db, func(tx *gorm.DB) (map[string][]byte, error) {
+		var cfg model.CloudflareSettings
+		if err := tx.FirstOrCreate(&cfg, model.CloudflareSettings{ID: 1}).Error; err != nil {
+			return nil, err
 		}
-		for _, ip := range strings.Split(cfg.IPv6List, "\n") {
-			ip = strings.TrimSpace(ip)
-			if ip != "" {
-				sb.WriteString("    " + ip + " 1;\n")
-			}
+		cfg.IPv4List = strings.TrimSpace(ipv4)
+		cfg.IPv6List = strings.TrimSpace(ipv6)
+		cfg.LastFetched = time.Now().UTC()
+		cfg.UpdatedAt = cfg.LastFetched
+		if err := tx.Save(&cfg).Error; err != nil {
+			return nil, err
 		}
-	} else {
-		sb.WriteString("    default 1;\n")
-	}
-
-	sb.WriteString("}\n")
-
-	return os.WriteFile(cloudflareGeoPath, []byte(sb.String()), 0644)
+		if !cfg.Enabled {
+			return nil, nil
+		}
+		data, err := renderCloudflareGeo(&cfg)
+		return map[string][]byte{"cloudflare-geo.conf": data}, err
+	})
 }
 
-// WriteCloudflareGeoOff writes a disabled geo block at startup.
-func WriteCloudflareGeoOff() {
-	content := "# Cloudflare IP Whitelist — disabled (startup default)\ngeo $cf_allow {\n    default 1;\n}\n"
-	os.WriteFile(cloudflareGeoPath, []byte(content), 0644)
-}
-
-// StartIPSync starts a background goroutine that refreshes Cloudflare IPs.
 func (s *CloudflareService) StartIPSync(interval time.Duration) {
 	go func() {
-		log.Printf("[cloudflare] IP sync started, interval=%s", interval)
+		// Give Tengine time to start on an initial Compose deployment.
 		time.Sleep(10 * time.Second)
-
-		if err := s.RefreshIPs(); err != nil {
-			log.Printf("[cloudflare] Initial IP sync failed: %v", err)
-		} else {
-			cfg, _ := s.GetSettings()
-			log.Printf("[cloudflare] Initial IP sync complete (v4: %d, v6: %d, enabled: %v)",
-				cfg.IPv4Count(), cfg.IPv6Count(), cfg.Enabled)
+		syncIPs := func() {
+			if err := s.RefreshIPs(); err != nil {
+				log.Printf("Cloudflare sync failed; retaining cached protection: %v", err)
+			}
 		}
-
+		syncIPs()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for range ticker.C {
-			if err := s.RefreshIPs(); err != nil {
-				log.Printf("[cloudflare] IP sync failed: %v", err)
-			} else {
-				log.Printf("[cloudflare] IP sync successful")
-			}
+			syncIPs()
 		}
 	}()
 }
@@ -165,15 +155,12 @@ func fetch(url string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", err
 	}
-
 	return string(body), nil
 }

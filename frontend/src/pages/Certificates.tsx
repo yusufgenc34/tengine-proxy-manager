@@ -7,6 +7,7 @@ import TableToolbar from '../components/TableToolbar'
 import Pagination from '../components/Pagination'
 import ConfirmDialog from '../components/ConfirmDialog'
 import DownloadGuideDialog from '../components/DownloadGuideDialog'
+import { useAuthStore } from '../store/auth'
 
 interface Certificate {
   id: number
@@ -39,6 +40,7 @@ function formatExpiry(expiresAt: string | null): string {
 }
 
 export default function Certificates() {
+  const role = useAuthStore(state => state.role)
   const [certs, setCerts] = useState<Certificate[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -202,7 +204,7 @@ export default function Certificates() {
                             <RefreshCw size={16} />
                           </button>
                         )}
-                        {cert.type === 'self-signed' && (
+                        {role === 'admin' && cert.type === 'self-signed' && (
                           <button onClick={() => handleDownload(cert)} className="p-1 hover:text-purple-600" title="Download">
                             <Download size={16} />
                           </button>

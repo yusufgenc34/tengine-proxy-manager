@@ -79,7 +79,7 @@ docker compose up -d
 
 ### 3. Initial Setup
 
-1. Open **http://localhost:5173** in your browser
+1. Open **http://localhost:3000** in your browser
 2. You'll see the setup screen — this means no admin user exists yet
 3. Find the **setup key** in the backend logs:
 
@@ -94,7 +94,7 @@ docker compose up -d
 
 | Service    | URL                          |
 |------------|------------------------------|
-| Frontend   | http://localhost:5173        |
+| Frontend   | http://localhost:3000        |
 | Backend    | http://localhost:4000        |
 | Tengine    | http://localhost:80 / :443   |
 | Health     | http://localhost:4000/api/v1/health |
@@ -172,7 +172,7 @@ docker exec -it tengineproxymanager-postgres-1 psql -U tpm -d tpm_dev \
   -c "TRUNCATE TABLE audit_logs, users, proxy_hosts, certificates, access_lists, cloudflare_settings CASCADE;"
 
 # 2. Remove setup key to generate a new one on restart
-docker exec tengineproxymanager-backend-1 rm -f /app/setup.key
+docker exec tengineproxymanager-backend-1 rm -f /app/data/setup.key
 
 # 3. Restart backend
 docker compose restart backend
@@ -181,7 +181,7 @@ docker compose restart backend
 docker logs tengineproxymanager-backend-1 2>&1 | grep "SETUP KEY"
 ```
 
-After reset, the setup page appears again at http://localhost:5173 with a **new** setup key.
+After reset, the production setup page appears again at http://localhost:3000 with a **new** setup key.
 
 ---
 
@@ -259,7 +259,7 @@ Check that PostgreSQL is healthy and env variables are set.
 ### Setup key not found
 The setup key is generated on first backend startup and printed to logs. If you lose it:
 ```bash
-docker exec tengineproxymanager-backend-1 cat /app/setup.key
+docker exec tengineproxymanager-backend-1 cat /app/data/setup.key
 ```
 
 ### Tengine config errors
@@ -289,3 +289,37 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 ## License
 
 [MIT](LICENSE)
+
+## Configuration and access guarantees
+
+Only administrators can manage users, system settings, audit logs, or download private keys. Certificates in use cannot be deleted. Unused certificate records are soft-deleted; their files are retained for recovery and require separate storage cleanup. Other authenticated users can manage proxy hosts, certificates, and access lists. Password changes invalidate existing sessions; the token format update requires existing users to sign in again.
+
+Configuration changes are serialized by a single backend instance. The backend stages database changes and atomically replaces config files, then waits for the Tengine container to validate and acknowledge reload before committing. Validation or commit failures restore the previous configuration. Run one backend replica per shared configuration volume. Reload acknowledgement confirms the validation and reload command succeeded; it is not an end-to-end upstream health check. A process or host crash between filesystem, reload, and database operations still requires reconciliation from backups; these resources do not support one distributed atomic commit.
+
+The Cloudflare whitelist is restored from cached database rules before startup. Enabling the whitelist fetches IPs first if no cached rules exist. An already enabled but empty whitelist denies traffic. Network failures preserve existing protection.
+
+The setup key is stored in the `backend_data` volume at `/app/data/setup.key` in Docker. For local runs, `SETUP_KEY_PATH` defaults to `setup.key` in the working directory. Production UI: http://localhost:3000; development UI: http://localhost:5173.
+
+## Regression checks
+
+```bash
+cd backend
+go test -race ./...
+go vet ./...
+cd ../frontend
+npm ci
+npm run build
+npm audit
+```
+
+The Go tests cover token separation, live role checks, revoked sessions, proxy lifecycle and ACLs, rollback after config rejection, invalid certificate uploads, and cached Cloudflare protection. SQLite is used only for isolated tests; production continues to use PostgreSQL.
+
+For end-to-end checks against a **fresh disposable** PostgreSQL/Tengine environment:
+
+```bash
+docker compose -p tpm-fix-regression -f docker-compose.test.yml up -d --build --wait
+python3 scripts/test-integration.py
+docker compose -p tpm-fix-regression -f docker-compose.test.yml down -v
+```
+
+These commands use separate test volumes and random localhost ports. The test creates accounts and proxy hosts, checks actual Tengine validation/rollback, and restarts the test backend. Clean up the test volumes before repeating it.

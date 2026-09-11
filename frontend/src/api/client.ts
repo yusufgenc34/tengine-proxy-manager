@@ -16,22 +16,28 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+let refreshPromise: Promise<string> | null = null
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !['/auth/login', '/auth/refresh', '/auth/2fa/login'].includes(originalRequest.url ?? '')) {
       originalRequest._retry = true
 
       const refreshToken = localStorage.getItem('refresh_token')
       if (refreshToken) {
         try {
-          const { data } = await axios.post('/api/v1/auth/refresh', {
-            refresh_token: refreshToken,
-          })
-          localStorage.setItem('access_token', data.access_token)
-          originalRequest.headers.Authorization = `Bearer ${data.access_token}`
+          if (!refreshPromise) {
+            refreshPromise = axios.post('/api/v1/auth/refresh', { refresh_token: refreshToken }, { timeout: 15000 })
+              .then(({ data }) => {
+                localStorage.setItem('access_token', data.access_token)
+                return data.access_token as string
+              }).finally(() => { refreshPromise = null })
+          }
+          const accessToken = await refreshPromise
+          originalRequest.headers.Authorization = `Bearer ${accessToken}`
           return api(originalRequest)
         } catch {
           localStorage.removeItem('access_token')

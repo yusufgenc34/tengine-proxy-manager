@@ -1,9 +1,14 @@
 package handler
 
 import (
-	"fmt"
+	"encoding/json"
+	"errors"
+	"gorm.io/gorm"
+	"net"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 
@@ -58,248 +63,186 @@ func (h *Handler) ListProxyHosts(c echo.Context) error {
 	})
 }
 
-func (h *Handler) CreateProxyHost(c echo.Context) error {
-	var host model.ProxyHost
-	if err := c.Bind(&host); err != nil {
-		return c.JSON(http.StatusBadRequest, model.APIError{
-			Error:   true,
-			Message: "Invalid request",
-			Code:    "BAD_REQUEST",
-		})
-	}
+// Nullable references distinguish an omitted field from an explicit JSON null.
+type proxyInput struct {
+	Domain        *string         `json:"domain"`
+	ForwardHost   *string         `json:"forward_host"`
+	ForwardPort   *int            `json:"forward_port"`
+	ForwardScheme *string         `json:"forward_scheme"`
+	Enabled       *bool           `json:"enabled"`
+	SslEnabled    *bool           `json:"ssl_enabled"`
+	HealthCheck   *bool           `json:"health_check"`
+	LoadBalancing *string         `json:"load_balancing"`
+	CertificateID json.RawMessage `json:"certificate_id"`
+	AccessListID  json.RawMessage `json:"access_list_id"`
+}
 
-	host.Domain = sanitizeDomain(host.Domain)
+func (in proxyInput) apply(host *model.ProxyHost) error {
+	if in.Domain != nil {
+		host.Domain = sanitizeDomain(*in.Domain)
+	}
+	if in.ForwardHost != nil {
+		host.ForwardHost = strings.TrimSpace(*in.ForwardHost)
+	}
+	if in.ForwardPort != nil {
+		host.ForwardPort = *in.ForwardPort
+	}
+	if in.ForwardScheme != nil {
+		host.ForwardScheme = *in.ForwardScheme
+	}
+	if in.Enabled != nil {
+		host.Enabled = *in.Enabled
+	}
+	if in.SslEnabled != nil {
+		host.SslEnabled = *in.SslEnabled
+	}
+	if in.HealthCheck != nil {
+		host.HealthCheck = *in.HealthCheck
+	}
+	if in.LoadBalancing != nil {
+		host.LoadBalancing = *in.LoadBalancing
+	}
+	for _, ref := range []struct {
+		raw    json.RawMessage
+		target **uint
+	}{{in.CertificateID, &host.CertificateID}, {in.AccessListID, &host.AccessListID}} {
+		if len(ref.raw) > 0 {
+			if err := json.Unmarshal(ref.raw, ref.target); err != nil {
+				return echo.NewHTTPError(http.StatusBadRequest, "Invalid reference ID")
+			}
+			if *ref.target != nil && **ref.target == 0 {
+				return echo.NewHTTPError(http.StatusBadRequest, "Reference ID must be positive")
+			}
+		}
+	}
+	return nil
+}
 
-	if host.Domain == "" || host.ForwardHost == "" || host.ForwardPort == 0 {
-		return c.JSON(http.StatusBadRequest, model.APIError{
-			Error:   true,
-			Message: "domain, forward_host and forward_port are required",
-			Code:    "VALIDATION_ERROR",
-		})
-	}
+var upstreamName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-	if !isValidDomain(host.Domain) {
-		return c.JSON(http.StatusBadRequest, model.APIError{Error: true, Message: "Invalid domain format", Code: "VALIDATION_ERROR"})
+func (h *Handler) prepareProxy(tx *gorm.DB, host *model.ProxyHost) error {
+	if !isValidDomain(host.Domain) || !isValidPort(host.ForwardPort) || !isValidScheme(host.ForwardScheme) || !isValidLoadBalancing(host.LoadBalancing) {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid domain, port, scheme or load balancing method")
 	}
-	if !isValidPort(host.ForwardPort) {
-		return c.JSON(http.StatusBadRequest, model.APIError{Error: true, Message: "Port must be between 1 and 65535", Code: "VALIDATION_ERROR"})
+	if !upstreamName.MatchString(host.ForwardHost) && net.ParseIP(strings.Trim(host.ForwardHost, "[]")) == nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid forward host")
 	}
-
-	if host.ForwardScheme == "" {
-		host.ForwardScheme = "http"
+	if ip := net.ParseIP(host.ForwardHost); ip != nil && strings.Contains(host.ForwardHost, ":") {
+		host.ForwardHost = "[" + host.ForwardHost + "]"
 	}
-
-	if !isValidScheme(host.ForwardScheme) {
-		return c.JSON(http.StatusBadRequest, model.APIError{Error: true, Message: "Scheme must be http or https", Code: "VALIDATION_ERROR"})
-	}
-	if !isValidLoadBalancing(host.LoadBalancing) {
-		return c.JSON(http.StatusBadRequest, model.APIError{Error: true, Message: "Invalid load balancing method", Code: "VALIDATION_ERROR"})
-	}
-
-	if err := h.db.Create(&host).Error; err != nil {
-		return c.JSON(http.StatusConflict, model.APIError{
-			Error:   true,
-			Message: "This domain already exists",
-			Code:    "DOMAIN_EXISTS",
-		})
-	}
-
-	// Load relationships for template rendering
+	host.Certificate, host.AccessList = nil, nil
 	if host.CertificateID != nil {
-		h.db.Preload("Certificate").First(&host, host.ID)
-	}
-
-	if h.tengine != nil {
-		// Validate SSL cert files exist before writing config to prevent tengine crash
-		if err := h.validator.ValidateProxyHost(&host); err != nil {
-			h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.create.validation_error",
-				fmt.Sprintf("Domain: %s - %v", host.Domain, err))
-			return c.JSON(http.StatusBadRequest, model.APIError{
-				Error:   true,
-				Message: err.Error(),
-				Code:    "CERT_MISSING",
-			})
-		}
-
-		if err := h.tengine.GenerateAndReload(host); err != nil {
-			h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.create.tengine_error",
-				fmt.Sprintf("Domain: %s - Tengine error: %v", host.Domain, err))
-			return c.JSON(http.StatusInternalServerError, model.APIError{
-				Error:   true,
-				Message: "Proxy host created but config generation failed",
-				Code:    "TENGINE_RELOAD_ERROR",
-			})
+		host.Certificate = &model.Certificate{}
+		if err := tx.First(host.Certificate, *host.CertificateID).Error; err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "Certificate not found")
 		}
 	}
+	if host.AccessListID != nil {
+		host.AccessList = &model.AccessList{}
+		if err := tx.First(host.AccessList, *host.AccessListID).Error; err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "Access list not found")
+		}
+	}
+	if err := h.validator.ValidateProxyHost(host); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	return nil
+}
 
-	h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.create",
-		fmt.Sprintf("Domain: %s -> %s://%s:%d", host.Domain, host.ForwardScheme, host.ForwardHost, host.ForwardPort))
+func configError(err error) error {
+	var httpErr *echo.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr
+	}
+	return echo.NewHTTPError(http.StatusInternalServerError, "Configuration change failed: "+err.Error())
+}
 
+func (h *Handler) CreateProxyHost(c echo.Context) error {
+	var input proxyInput
+	if err := c.Bind(&input); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid request")
+	}
+	host := model.ProxyHost{Enabled: true, ForwardScheme: "http"}
+	if err := input.apply(&host); err != nil {
+		return err
+	}
+	err := h.tengine.Transaction(h.db, func(tx *gorm.DB) (map[string][]byte, error) {
+		if err := h.prepareProxy(tx, &host); err != nil {
+			return nil, err
+		}
+		enabled := host.Enabled
+		if err := tx.Omit("Certificate", "AccessList").Create(&host).Error; err != nil {
+			return nil, echo.NewHTTPError(http.StatusConflict, "Could not create proxy host; domain may already exist")
+		}
+		host.Enabled = enabled
+		if err := tx.Model(&host).Update("enabled", enabled).Error; err != nil {
+			return nil, err
+		}
+		data, err := h.tengine.Render(host)
+		return map[string][]byte{host.Domain + ".conf": data}, err
+	})
+	if err != nil {
+		return configError(err)
+	}
+	h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.create", host.Domain)
 	return c.JSON(http.StatusCreated, host)
 }
 
 func (h *Handler) UpdateProxyHost(c echo.Context) error {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, model.APIError{
-			Error: true, Message: "Invalid ID", Code: "BAD_REQUEST",
-		})
-	}
-
-	var host model.ProxyHost
-	if err := h.db.First(&host, id).Error; err != nil {
-		return c.JSON(http.StatusNotFound, model.APIError{
-			Error: true, Message: "Proxy host not found", Code: "PROXY_HOST_NOT_FOUND",
-		})
-	}
-
-	var input struct {
-		Domain        string `json:"domain"`
-		ForwardHost   string `json:"forward_host"`
-		ForwardPort   int    `json:"forward_port"`
-		ForwardScheme string `json:"forward_scheme"`
-		Enabled       *bool  `json:"enabled"`
-		SslEnabled    *bool  `json:"ssl_enabled"`
-		HealthCheck   *bool  `json:"health_check"`
-		LoadBalancing string `json:"load_balancing"`
-		CertificateID *uint  `json:"certificate_id"`
-		AccessListID  *uint  `json:"access_list_id"`
-	}
+	var input proxyInput
 	if err := c.Bind(&input); err != nil {
-		return c.JSON(http.StatusBadRequest, model.APIError{
-			Error: true, Message: "Invalid request", Code: "BAD_REQUEST",
-		})
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid request")
 	}
-
-	updates := map[string]any{}
-	if input.Domain != "" {
-		updates["domain"] = input.Domain
-	}
-	if input.ForwardHost != "" {
-		updates["forward_host"] = input.ForwardHost
-	}
-	if input.ForwardPort != 0 {
-		updates["forward_port"] = input.ForwardPort
-	}
-	if input.ForwardScheme != "" {
-		updates["forward_scheme"] = input.ForwardScheme
-	}
-	if input.LoadBalancing != "" {
-		updates["load_balancing"] = input.LoadBalancing
-	}
-	if input.CertificateID != nil {
-		updates["certificate_id"] = *input.CertificateID
-	}
-	if input.AccessListID != nil {
-		updates["access_list_id"] = *input.AccessListID
-	}
-	if input.Enabled != nil {
-		updates["enabled"] = *input.Enabled
-	}
-	if input.SslEnabled != nil {
-		updates["ssl_enabled"] = *input.SslEnabled
-	}
-	if input.HealthCheck != nil {
-		updates["health_check"] = *input.HealthCheck
-	}
-
-	if len(updates) > 0 {
-		h.db.Model(&host).Updates(updates)
-	}
-
-	h.db.Preload("Certificate").Preload("AccessList").First(&host, id)
-
-	if h.tengine != nil {
-		// Validate SSL cert files exist before writing config to prevent tengine crash
-		if err := h.validator.ValidateProxyHost(&host); err != nil {
-			h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.update.validation_error",
-				fmt.Sprintf("ID: %d - %v", id, err))
-			return c.JSON(http.StatusBadRequest, model.APIError{
-				Error:   true,
-				Message: err.Error(),
-				Code:    "CERT_MISSING",
-			})
-		}
-
-		if err := h.tengine.GenerateAndReload(host); err != nil {
-			h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.update.tengine_error",
-				fmt.Sprintf("ID: %d - Tengine error: %v", id, err))
-		}
-	}
-
-	h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.update",
-		fmt.Sprintf("ID: %d, Domain: %s", id, host.Domain))
-
-	return c.JSON(http.StatusOK, host)
+	return h.changeProxy(c, &input, false)
 }
-
-func (h *Handler) DeleteProxyHost(c echo.Context) error {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, model.APIError{
-			Error: true, Message: "Invalid ID", Code: "BAD_REQUEST",
-		})
-	}
-
-	var host model.ProxyHost
-	if err := h.db.First(&host, id).Error; err != nil {
-		return c.JSON(http.StatusNotFound, model.APIError{
-			Error: true, Message: "Proxy host not found", Code: "PROXY_HOST_NOT_FOUND",
-		})
-	}
-
-	h.db.Delete(&host, id)
-
-	if h.tengine != nil {
-		h.tengine.DeleteConfig(host.Domain)
-	}
-
-	h.audit.Log(userIDFromContext(c), clientIP(c), "proxy_host.delete",
-		fmt.Sprintf("ID: %d, Domain: %s", id, host.Domain))
-
-	return c.JSON(http.StatusOK, map[string]any{"message": "Deleted"})
-}
-
+func (h *Handler) DeleteProxyHost(c echo.Context) error { return h.changeProxy(c, nil, true) }
 func (h *Handler) EnableProxyHost(c echo.Context) error {
-	return h.toggleProxyHost(c, true)
+	enabled := true
+	return h.changeProxy(c, &proxyInput{Enabled: &enabled}, false)
 }
-
 func (h *Handler) DisableProxyHost(c echo.Context) error {
-	return h.toggleProxyHost(c, false)
+	enabled := false
+	return h.changeProxy(c, &proxyInput{Enabled: &enabled}, false)
 }
 
-func (h *Handler) toggleProxyHost(c echo.Context, enabled bool) error {
+func (h *Handler) changeProxy(c echo.Context, input *proxyInput, remove bool) error {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, model.APIError{
-			Error: true, Message: "Invalid ID", Code: "BAD_REQUEST",
-		})
+	if err != nil || id == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid ID")
 	}
-
 	var host model.ProxyHost
-	if err := h.db.First(&host, id).Error; err != nil {
-		return c.JSON(http.StatusNotFound, model.APIError{
-			Error: true, Message: "Proxy host not found", Code: "PROXY_HOST_NOT_FOUND",
-		})
-	}
-
-	h.db.Model(&host).Update("enabled", enabled)
-	host.Enabled = enabled
-
-	if h.tengine != nil {
-		if enabled {
-			h.db.Preload("Certificate").First(&host, host.ID)
-			h.tengine.GenerateAndReload(host)
-		} else {
-			h.tengine.DeleteConfig(host.Domain)
+	err = h.tengine.Transaction(h.db, func(tx *gorm.DB) (map[string][]byte, error) {
+		if err := tx.First(&host, id).Error; err != nil {
+			return nil, echo.NewHTTPError(http.StatusNotFound, "Proxy host not found")
 		}
+		oldDomain := host.Domain
+		changes := map[string][]byte{oldDomain + ".conf": nil}
+		if remove {
+			return changes, tx.Delete(&host).Error
+		}
+		if err := input.apply(&host); err != nil {
+			return nil, err
+		}
+		if err := h.prepareProxy(tx, &host); err != nil {
+			return nil, err
+		}
+		if err := tx.Omit("Certificate", "AccessList").Save(&host).Error; err != nil {
+			return nil, err
+		}
+		data, err := h.tengine.Render(host)
+		changes[host.Domain+".conf"] = data
+		return changes, err
+	})
+	if err != nil {
+		return configError(err)
 	}
-
-	action := "proxy_host.enable"
-	if !enabled {
-		action = "proxy_host.disable"
+	action := "proxy_host.update"
+	if remove {
+		action = "proxy_host.delete"
 	}
-	h.audit.Log(userIDFromContext(c), clientIP(c), action, fmt.Sprintf("ID: %d, Domain: %s", id, host.Domain))
-
+	h.audit.Log(userIDFromContext(c), clientIP(c), action, host.Domain)
+	if remove {
+		return c.JSON(http.StatusOK, map[string]string{"message": "Deleted"})
+	}
 	return c.JSON(http.StatusOK, host)
 }

@@ -30,9 +30,16 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       JWT_SECRET: ${JWT_SECRET}
       TENGINE_CONF_DIR: /etc/tengine/conf.d
+      SETUP_KEY_PATH: /app/data/setup.key
     volumes:
       - tengine_conf:/etc/tengine
       - letsencrypt_data:/etc/letsencrypt
+      - backend_data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:4000/api/v1/setup/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     ports:
       - "4000:4000"
 
@@ -60,9 +67,11 @@ services:
       - letsencrypt_data:/etc/letsencrypt:ro
       - tengine_logs:/var/log/tengine
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
+  backend_data:
   postgres_data:
   tengine_conf:
   letsencrypt_data:

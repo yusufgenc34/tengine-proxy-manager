@@ -40,6 +40,7 @@ COPY --from=builder /etc/tengine /etc/tengine
 
 # Replace the default nginx.conf with our custom one (no default server block)
 COPY nginx.conf /etc/tengine/nginx.conf
+RUN mkdir -p /opt/tengine-defaults && cp /etc/tengine/nginx.conf /etc/tengine/mime.types /opt/tengine-defaults/
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

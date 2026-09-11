@@ -6,7 +6,7 @@ import { useAuthStore } from '../store/auth'
 import PasswordInput from '../components/PasswordInput'
 
 export default function Account() {
-  const { checkAuth } = useAuthStore()
+  const { logout } = useAuthStore()
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [twofaOpen, setTwofaOpen] = useState(false)
   const [enabled, setEnabled] = useState(false)
@@ -60,7 +60,7 @@ export default function Account() {
     if (newPassword !== confirmPassword) { toast.error('Passwords do not match'); return }
     if (newPassword.length < 8) { toast.error('Password must be at least 8 characters'); return }
     setPwSaving(true)
-    try { await api.put('/auth/password', { current_password: currentPassword, new_password: newPassword }); toast.success('Password changed'); setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setPasswordOpen(false) }
+    try { await api.put('/auth/password', { current_password: currentPassword, new_password: newPassword }); toast.success('Password changed. Please sign in again.'); logout(); setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setPasswordOpen(false) }
     catch (err: any) { toast.error(err.response?.data?.message || 'Failed to change password') }
     finally { setPwSaving(false) }
   }
